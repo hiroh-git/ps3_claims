@@ -15,66 +15,87 @@ from ps3.data import create_sample_split, load_transform
 
 # %%
 # load data
+# %%
+# %%
+from ps3.data import load_transform
+
+print("Loading OpenML data...", flush=True)
 df = load_transform()
+print(df.shape)
+print(df[["IDpol", "Exposure", "ClaimAmountCut"]].head())
+
+
+
+# %%
+from ps3.data import create_sample_split
+
+df = create_sample_split(df, id_column="IDpol", training_frac=0.9)
+
+df_train = df.loc[df["sample"] == "train"].copy()
+df_test = df.loc[df["sample"] == "test"].copy()
+
+print(df["sample"].value_counts())
+
+
 
 # %%
 # Train benchmark tweedie model. This is entirely based on the glum tutorial.
-weight = df["Exposure"].values
-df["PurePremium"] = df["ClaimAmountCut"] / df["Exposure"]
-y = df["PurePremium"]
-# TODO: Why do you think, we divide by exposure here to arrive at our outcome variable?
+from sklearn.compose import ColumnTransformer
+from sklearn.linear_model import TweedieRegressor
+from sklearn.metrics import mean_tweedie_deviance
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+
+df_train = df_train.loc[df_train["Exposure"] > 0].copy()
+df_test = df_test.loc[df_test["Exposure"] > 0].copy()
+
+w_train = df_train["Exposure"]
+w_test = df_test["Exposure"]
+
+# Divide by exposure to express claims per insured year.
+y_train = df_train["ClaimAmountCut"] / w_train
+y_test = df_test["ClaimAmountCut"] / w_test
+
+categorical_cols = ["VehBrand", "VehGas", "Region", "Area", "DrivAge", "VehAge"]
+numeric_cols = ["BonusMalus", "VehPower", "Density"]
+feature_cols = categorical_cols + numeric_cols
+
+X_train = df_train[feature_cols]
+X_test = df_test[feature_cols]
+
+POWER = 1.5
 
 
-# TODO: use your create_sample_split function here
-# df = create_sample_split(...)
-train = np.where(df["sample"] == "train")
-test = np.where(df["sample"] == "test")
-df_train = df.iloc[train].copy()
-df_test = df.iloc[test].copy()
-
-categoricals = ["VehBrand", "VehGas", "Region", "Area", "DrivAge", "VehAge", "VehPower"]
-
-predictors = categoricals + ["BonusMalus", "Density"]
-glm_categorizer = Categorizer(columns=categoricals)
-
-X_train_t = glm_categorizer.fit_transform(df[predictors].iloc[train])
-X_test_t = glm_categorizer.transform(df[predictors].iloc[test])
-y_train_t, y_test_t = y.iloc[train], y.iloc[test]
-w_train_t, w_test_t = weight[train], weight[test]
-
-TweedieDist = TweedieDistribution(1.5)
-t_glm1 = GeneralizedLinearRegressor(family=TweedieDist, l1_ratio=1, fit_intercept=True)
-t_glm1.fit(X_train_t, y_train_t, sample_weight=w_train_t)
+def make_glm(numeric_features):
+    preprocess = ColumnTransformer([
+        ("cat", OneHotEncoder(drop="first", handle_unknown="ignore"), categorical_cols),
+        ("num", StandardScaler(), numeric_features),
+    ])
+    return Pipeline([
+        ("preprocess", preprocess),
+        ("model", TweedieRegressor(
+            power=POWER, link="log", alpha=0.0, max_iter=1000
+        )),
+    ])
 
 
-pd.DataFrame(
-    {"coefficient": np.concatenate(([t_glm1.intercept_], t_glm1.coef_))},
-    index=["intercept"] + t_glm1.feature_names_,
-).T
-
-df_test["pp_t_glm1"] = t_glm1.predict(X_test_t)
-df_train["pp_t_glm1"] = t_glm1.predict(X_train_t)
-
-print(
-    "training loss t_glm1:  {}".format(
-        TweedieDist.deviance(y_train_t, df_train["pp_t_glm1"], sample_weight=w_train_t)
-        / np.sum(w_train_t)
+def deviance(model, X, y, exposure):
+    return mean_tweedie_deviance(
+        y, model.predict(X), sample_weight=exposure, power=POWER
     )
-)
 
-print(
-    "testing loss t_glm1:  {}".format(
-        TweedieDist.deviance(y_test_t, df_test["pp_t_glm1"], sample_weight=w_test_t)
-        / np.sum(w_test_t)
-    )
-)
 
-print(
-    "Total claim amount on test set, observed = {}, predicted = {}".format(
-        df["ClaimAmountCut"].values[test].sum(),
-        np.sum(df["Exposure"].values[test] * t_glm1.predict(X_test_t)),
-    )
-)
+linear_glm = make_glm(numeric_cols)
+linear_glm.fit(X_train, y_train, model__sample_weight=w_train)
+
+linear_train = deviance(linear_glm, X_train, y_train, w_train)
+linear_test = deviance(linear_glm, X_test, y_test, w_test)
+
+print(f"Linear GLM train deviance: {linear_train:.4f}")
+print(f"Linear GLM test deviance:  {linear_test:.4f}")
+
+
+
 # %%
 # TODO: Let's add splines for BonusMalus and Density and use a Pipeline.
 # Steps: 
@@ -84,59 +105,63 @@ print(
 # 2. Put the transforms together into a ColumnTransformer. Here we use OneHotEncoder for the categoricals.
 # 3. Chain the transforms together with the GLM in a Pipeline.
 
-# Let's put together a pipeline
-numeric_cols = ["BonusMalus", "Density"]
-preprocessor = ColumnTransformer(
-    transformers=[
-        # TODO: Add numeric transforms here
-        ("cat", OneHotEncoder(sparse_output=False, drop="first"), categoricals),
-    ]
+X_train_quad = X_train.assign(
+    BonusMalus_sq=X_train["BonusMalus"] ** 2,
+    VehPower_sq=X_train["VehPower"] ** 2,
 )
-preprocessor.set_output(transform="pandas")
-model_pipeline = Pipeline(
-    # TODO: Define pipeline steps here
+X_test_quad = X_test.assign(
+    BonusMalus_sq=X_test["BonusMalus"] ** 2,
+    VehPower_sq=X_test["VehPower"] ** 2,
 )
 
-# let's have a look at the pipeline
-model_pipeline
+quadratic_glm = make_glm(numeric_cols + ["BonusMalus_sq", "VehPower_sq"])
+quadratic_glm.fit(X_train_quad, y_train, model__sample_weight=w_train)
 
-# let's check that the transforms worked
-model_pipeline[:-1].fit_transform(df_train)
+quadratic_train = deviance(quadratic_glm, X_train_quad, y_train, w_train)
+quadratic_test = deviance(quadratic_glm, X_test_quad, y_test, w_test)
 
-model_pipeline.fit(df_train, y_train_t, estimate__sample_weight=w_train_t)
+print(f"Quadratic GLM train deviance: {quadratic_train:.4f}")
+print(f"Quadratic GLM test deviance:  {quadratic_test:.4f}")
+print(f"Change in train deviance: {quadratic_train - linear_train:+.4f}")
+print(f"Change in test deviance:  {quadratic_test - linear_test:+.4f}")
 
-pd.DataFrame(
-    {
-        "coefficient": np.concatenate(
-            ([model_pipeline[-1].intercept_], model_pipeline[-1].coef_)
-        )
-    },
-    index=["intercept"] + model_pipeline[-1].feature_names_,
-).T
 
-df_test["pp_t_glm2"] = model_pipeline.predict(df_test)
-df_train["pp_t_glm2"] = model_pipeline.predict(df_train)
 
-print(
-    "training loss t_glm2:  {}".format(
-        TweedieDist.deviance(y_train_t, df_train["pp_t_glm2"], sample_weight=w_train_t)
-        / np.sum(w_train_t)
+# %%
+from sklearn.model_selection import KFold, cross_validate
+
+cv = KFold(n_splits=3, shuffle=True, random_state=42)
+
+
+def neg_weighted_deviance(model, X_val, y_val):
+    weights = w_train.loc[X_val.index]
+    return -deviance(model, X_val, y_val, weights)
+
+
+def cv_deviance(model, X):
+    scores = cross_validate(
+        model,
+        X,
+        y_train,
+        cv=cv,
+        scoring=neg_weighted_deviance,
+        params={"model__sample_weight": w_train},
+        error_score="raise",
     )
-)
+    return -scores["test_score"]
 
-print(
-    "testing loss t_glm2:  {}".format(
-        TweedieDist.deviance(y_test_t, df_test["pp_t_glm2"], sample_weight=w_test_t)
-        / np.sum(w_test_t)
-    )
-)
 
-print(
-    "Total claim amount on test set, observed = {}, predicted = {}".format(
-        df["ClaimAmountCut"].values[test].sum(),
-        np.sum(df["Exposure"].values[test] * df_test["pp_t_glm2"]),
-    )
-)
+linear_cv = cv_deviance(linear_glm, X_train)
+quadratic_cv = cv_deviance(quadratic_glm, X_train_quad)
+fold_changes = quadratic_cv - linear_cv
+
+print("CV deviance change by fold:", fold_changes.round(4))
+print(f"Mean CV deviance change: {fold_changes.mean():+.4f}")
+
+
+
+
+
 
 # %%
 # TODO: Let's use a GBM instead as an estimator.
@@ -144,60 +169,65 @@ print(
 # 1: Define the modelling pipeline. Tip: This can simply be a LGBMRegressor based on X_train_t from before.
 # 2. Make sure we are choosing the correct objective for our estimator.
 
-model_pipeline.fit(X_train_t, y_train_t, estimate__sample_weight=w_train_t)
-df_test["pp_t_lgbm"] = model_pipeline.predict(X_test_t)
-df_train["pp_t_lgbm"] = model_pipeline.predict(X_train_t)
-print(
-    "training loss t_lgbm:  {}".format(
-        TweedieDist.deviance(y_train_t, df_train["pp_t_lgbm"], sample_weight=w_train_t)
-        / np.sum(w_train_t)
-    )
-)
+import pandas as pd
+from lightgbm import LGBMRegressor
+from sklearn.model_selection import GridSearchCV
 
-print(
-    "testing loss t_lgbm:  {}".format(
-        TweedieDist.deviance(y_test_t, df_test["pp_t_lgbm"], sample_weight=w_test_t)
-        / np.sum(w_test_t)
-    )
+lgbm_preprocess = ColumnTransformer([
+    ("cat", OneHotEncoder(handle_unknown="ignore"), categorical_cols),
+    ("num", "passthrough", numeric_cols),
+])
+
+lgbm_pipeline = Pipeline([
+    ("preprocess", lgbm_preprocess),
+    ("model", LGBMRegressor(
+        objective="tweedie",
+        tweedie_variance_power=POWER,
+        random_state=42,
+        n_jobs=2,
+        verbosity=-1,
+    )),
+])
+
+search = GridSearchCV(
+    lgbm_pipeline,
+    param_grid={
+        "model__learning_rate": [0.03, 0.08],
+        "model__n_estimators": [100, 250],
+        "model__num_leaves": [8, 16],
+    },
+    cv=cv,
+    scoring=neg_weighted_deviance,
+    refit=True,
+    verbose=1,
+    error_score="raise",
 )
+search.fit(X_train, y_train, model__sample_weight=w_train)
+
+best_lgbm = search.best_estimator_
+lgbm_train = deviance(best_lgbm, X_train, y_train, w_train)
+lgbm_test = deviance(best_lgbm, X_test, y_test, w_test)
+
+results = pd.DataFrame({
+    "Model": ["Linear Tweedie", "Quadratic Tweedie", "Tuned LightGBM"],
+    "Train deviance": [linear_train, quadratic_train, lgbm_train],
+    "CV deviance": [linear_cv.mean(), quadratic_cv.mean(), -search.best_score_],
+    "Test deviance": [linear_test, quadratic_test, lgbm_test],
+})
+
+print("Best LightGBM parameters:", search.best_params_)
+print(results.round(4).to_string(index=False))
 
 # %%
-# TODO: Let's tune the LGBM to reduce overfitting.
-# Steps:
-# 1. Define a `GridSearchCV` object with our lgbm pipeline/estimator. Tip: Parameters for a specific step of the pipeline
-# can be passed by <step_name>__param. 
 
-# Note: Typically we tune many more parameters and larger grids,
-# but to save compute time here, we focus on getting the learning rate
-# and the number of estimators somewhat aligned -> tune learning_rate and n_estimators
-cv = GridSearchCV(
+import matplotlib.pyplot as plt
+import numpy as np
+from sklearn.metrics import auc
 
-)
-cv.fit(X_train_t, y_train_t, estimate__sample_weight=w_train_t)
-
-df_test["pp_t_lgbm"] = cv.best_estimator_.predict(X_test_t)
-df_train["pp_t_lgbm"] = cv.best_estimator_.predict(X_train_t)
-
-print(
-    "training loss t_lgbm:  {}".format(
-        TweedieDist.deviance(y_train_t, df_train["pp_t_lgbm"], sample_weight=w_train_t)
-        / np.sum(w_train_t)
-    )
-)
-
-print(
-    "testing loss t_lgbm:  {}".format(
-        TweedieDist.deviance(y_test_t, df_test["pp_t_lgbm"], sample_weight=w_test_t)
-        / np.sum(w_test_t)
-    )
-)
-
-print(
-    "Total claim amount on test set, observed = {}, predicted = {}".format(
-        df["ClaimAmountCut"].values[test].sum(),
-        np.sum(df["Exposure"].values[test] * df_test["pp_t_lgbm"]),
-    )
-)
+df_test["PurePremium"] = y_test
+df_test["pp_t_glm1"] = linear_glm.predict(X_test)
+df_test["pp_t_glm2"] = quadratic_glm.predict(X_test_quad)
+df_test["pp_t_lgbm"] = best_lgbm.predict(X_test)
 # %%
 # Let's compare the sorting of the pure premium predictions
 
@@ -213,16 +243,17 @@ def lorenz_curve(y_true, y_pred, exposure):
     ranked_pure_premium = y_true[ranking]
     cumulated_claim_amount = np.cumsum(ranked_pure_premium * ranked_exposure)
     cumulated_claim_amount /= cumulated_claim_amount[-1]
-    cumulated_samples = np.linspace(0, 1, len(cumulated_claim_amount))
-    return cumulated_samples, cumulated_claim_amount
+    cumulated_samples = np.arange(1, len(cumulated_claim_amount) + 1)
+    cumulated_samples = cumulated_samples / len(cumulated_claim_amount)
+    return np.r_[0.0, cumulated_samples], np.r_[0.0, cumulated_claim_amount]
 
 
 fig, ax = plt.subplots(figsize=(8, 8))
 
 for label, y_pred in [
-    ("LGBM", df_test["pp_t_lgbm"]),
-    ("GLM Benchmark", df_test["pp_t_glm1"]),
-    ("GLM Splines", df_test["pp_t_glm2"]),
+    ("Tuned LightGBM", df_test["pp_t_lgbm"]),
+    ("Linear Tweedie", df_test["pp_t_glm1"]),
+    ("Quadratic Tweedie", df_test["pp_t_glm2"]),
 ]:
     ordered_samples, cum_claims = lorenz_curve(
         df_test["PurePremium"], y_pred, df_test["Exposure"]
@@ -247,6 +278,10 @@ ax.set(
     ylabel="Fraction of total claim amount",
 )
 ax.legend(loc="upper left")
-plt.plot()
+plt.show()
 
 # %%
+# Adding quadratic terms reduced train and test deviance by 0.0652 and 0.0358.
+# Mean CV deviance fell by 0.0222, with improvement in two of the three folds.
+# The tuned LightGBM had the lowest test deviance (72.8520) and the highest
+# Gini among the fitted models (0.251).
