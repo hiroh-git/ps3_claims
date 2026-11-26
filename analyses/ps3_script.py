@@ -438,3 +438,22 @@ print(f"Lowest test metric after {np.argmin(test_curve) + 1} trees")
 # value in the grid) and only flattens around 600 trees, so the model is not
 # tuned optimally: the grid should include more trees. Train keeps falling
 # while test flattens, i.e. extra trees mostly fit the training data.
+
+# %%
+# PS4 Ex 3: compare the unconstrained and constrained LGBM on the test set.
+from ps3.evaluation import evaluate_predictions
+
+metrics_comparison = pd.concat(
+    {
+        "Unconstrained LGBM": evaluate_predictions(
+            y_test, df_test["pp_t_lgbm"], w_test
+        )["value"],
+        "Constrained LGBM": evaluate_predictions(
+            y_test, df_test["pp_t_lgbm_constrained"], w_test
+        )["value"],
+    },
+    axis=1,
+)
+print(metrics_comparison.round(4))
+
+# %%
