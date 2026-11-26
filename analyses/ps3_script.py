@@ -399,3 +399,42 @@ print("  constrained:  ", n_decreasing_profiles(best_constrained_lgbm))
 
 #  small loss in deviance (about 0.2, small compared with the fold-to-fold variation of about 0.8)
 #  buys predictions that are monotone in BonusMalus, plus less overfitting
+
+# %%
+# PS4 Ex 2: learning curve of the best constrained LGBM.
+import lightgbm as lgb
+
+# eval_set data is passed straight to LightGBM, bypassing the pipeline, so we
+# preprocess it with the fitted preprocessing step (LightGBM sees 54 columns).
+fitted_preprocess = best_constrained_lgbm.named_steps["preprocess"]
+X_train_prep = fitted_preprocess.transform(X_train)
+X_test_prep = fitted_preprocess.transform(X_test)
+
+# Best constrained settings, but 1000 trees to see where the test curve stops
+# improving. Diagnostic only: picking n_estimators from the test curve would
+# be tuning on the test set (use CV or early stopping on train data instead).
+curve_lgbm = clone(best_constrained_lgbm.named_steps["model"]).set_params(
+    n_estimators=1000
+)
+curve_lgbm.fit(
+    X_train_prep,
+    y_train,
+    sample_weight=w_train,
+    eval_set=[(X_train_prep, y_train), (X_test_prep, y_test)],
+    eval_names=["train", "test"],
+    eval_sample_weight=[w_train, w_test],
+)
+
+best_n = constrained_search.best_params_["model__n_estimators"]
+ax = lgb.plot_metric(curve_lgbm, figsize=(8, 5))
+ax.axvline(best_n, color="grey", linestyle="--", label=f"CV choice ({best_n} trees)")
+ax.legend()
+plt.show()
+
+test_curve = curve_lgbm.evals_result_["test"]["tweedie"]
+print(f"Lowest test metric after {np.argmin(test_curve) + 1} trees")
+
+# The test metric is still falling at the CV choice of 250 trees (the largest
+# value in the grid) and only flattens around 600 trees, so the model is not
+# tuned optimally: the grid should include more trees. Train keeps falling
+# while test flattens, i.e. extra trees mostly fit the training data.
