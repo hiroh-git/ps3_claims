@@ -2,14 +2,13 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from dask_ml.preprocessing import Categorizer
-from glum import GeneralizedLinearRegressor, TweedieDistribution
 from lightgbm import LGBMRegressor
+from numpy.typing import ArrayLike
 from sklearn.compose import ColumnTransformer
 from sklearn.metrics import auc
 from sklearn.model_selection import GridSearchCV
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, SplineTransformer, StandardScaler
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 from ps3.data import create_sample_split, load_transform
 
@@ -17,7 +16,6 @@ from ps3.data import create_sample_split, load_transform
 # load data
 # %%
 # %%
-from ps3.data import load_transform
 
 print("Loading OpenML data...", flush=True)
 df = load_transform()
@@ -25,9 +23,7 @@ print(df.shape)
 print(df[["IDpol", "Exposure", "ClaimAmountCut"]].head())
 
 
-
 # %%
-from ps3.data import create_sample_split
 
 df = create_sample_split(df, id_column="IDpol", training_frac=0.9)
 
@@ -37,14 +33,10 @@ df_test = df.loc[df["sample"] == "test"].copy()
 print(df["sample"].value_counts())
 
 
-
 # %%
 # Train benchmark tweedie model. This is entirely based on the glum tutorial.
-from sklearn.compose import ColumnTransformer
 from sklearn.linear_model import TweedieRegressor
 from sklearn.metrics import mean_tweedie_deviance
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 df_train = df_train.loc[df_train["Exposure"] > 0].copy()
 df_test = df_test.loc[df_test["Exposure"] > 0].copy()
@@ -66,22 +58,33 @@ X_test = df_test[feature_cols]
 POWER = 1.5
 
 
-def make_glm(numeric_features):
-    preprocess = ColumnTransformer([
-        ("cat", OneHotEncoder(drop="first", handle_unknown="ignore"), categorical_cols),
-        ("num", StandardScaler(), numeric_features),
-    ])
-    return Pipeline([
-        ("preprocess", preprocess),
-        ("model", TweedieRegressor(
-            power=POWER, link="log", alpha=0.0, max_iter=1000
-        )),
-    ])
+def make_glm(numeric_features: list[str]) -> Pipeline:
+    preprocess = ColumnTransformer(
+        [
+            (
+                "cat",
+                OneHotEncoder(drop="first", handle_unknown="ignore"),
+                categorical_cols,
+            ),
+            ("num", StandardScaler(), numeric_features),
+        ]
+    )
+    return Pipeline(
+        [
+            ("preprocess", preprocess),
+            (
+                "model",
+                TweedieRegressor(power=POWER, link="log", alpha=0.0, max_iter=1000),
+            ),
+        ]
+    )
 
 
-def deviance(model, X, y, exposure):
-    return mean_tweedie_deviance(
-        y, model.predict(X), sample_weight=exposure, power=POWER
+def deviance(
+    model: Pipeline, X: pd.DataFrame, y: pd.Series, exposure: pd.Series
+) -> float:
+    return float(
+        mean_tweedie_deviance(y, model.predict(X), sample_weight=exposure, power=POWER)
     )
 
 
@@ -95,13 +98,12 @@ print(f"Linear GLM train deviance: {linear_train:.4f}")
 print(f"Linear GLM test deviance:  {linear_test:.4f}")
 
 
-
 # %%
 # TODO: Let's add splines for BonusMalus and Density and use a Pipeline.
-# Steps: 
-# 1. Define a Pipeline which chains a StandardScaler and SplineTransformer. 
-#    Choose knots="quantile" for the SplineTransformer and make sure, we 
-#    are only including one intercept in the final GLM. 
+# Steps:
+# 1. Define a Pipeline which chains a StandardScaler and SplineTransformer.
+#    Choose knots="quantile" for the SplineTransformer and make sure, we
+#    are only including one intercept in the final GLM.
 # 2. Put the transforms together into a ColumnTransformer. Here we use OneHotEncoder for the categoricals.
 # 3. Chain the transforms together with the GLM in a Pipeline.
 
@@ -126,19 +128,20 @@ print(f"Change in train deviance: {quadratic_train - linear_train:+.4f}")
 print(f"Change in test deviance:  {quadratic_test - linear_test:+.4f}")
 
 
-
 # %%
 from sklearn.model_selection import KFold, cross_validate
 
 cv = KFold(n_splits=3, shuffle=True, random_state=42)
 
 
-def neg_weighted_deviance(model, X_val, y_val):
+def neg_weighted_deviance(
+    model: Pipeline, X_val: pd.DataFrame, y_val: pd.Series
+) -> float:
     weights = w_train.loc[X_val.index]
     return -deviance(model, X_val, y_val, weights)
 
 
-def cv_deviance(model, X):
+def cv_deviance(model: Pipeline, X: pd.DataFrame) -> np.ndarray:
     scores = cross_validate(
         model,
         X,
@@ -148,7 +151,7 @@ def cv_deviance(model, X):
         params={"model__sample_weight": w_train},
         error_score="raise",
     )
-    return -scores["test_score"]
+    return -np.asarray(scores["test_score"])
 
 
 linear_cv = cv_deviance(linear_glm, X_train)
@@ -159,35 +162,35 @@ print("CV deviance change by fold:", fold_changes.round(4))
 print(f"Mean CV deviance change: {fold_changes.mean():+.4f}")
 
 
-
-
-
-
 # %%
 # TODO: Let's use a GBM instead as an estimator.
 # Steps
 # 1: Define the modelling pipeline. Tip: This can simply be a LGBMRegressor based on X_train_t from before.
 # 2. Make sure we are choosing the correct objective for our estimator.
 
-import pandas as pd
-from lightgbm import LGBMRegressor
-from sklearn.model_selection import GridSearchCV
 
-lgbm_preprocess = ColumnTransformer([
-    ("cat", OneHotEncoder(handle_unknown="ignore"), categorical_cols),
-    ("num", "passthrough", numeric_cols),
-])
+lgbm_preprocess = ColumnTransformer(
+    [
+        ("cat", OneHotEncoder(handle_unknown="ignore"), categorical_cols),
+        ("num", "passthrough", numeric_cols),
+    ]
+)
 
-lgbm_pipeline = Pipeline([
-    ("preprocess", lgbm_preprocess),
-    ("model", LGBMRegressor(
-        objective="tweedie",
-        tweedie_variance_power=POWER,
-        random_state=42,
-        n_jobs=2,
-        verbosity=-1,
-    )),
-])
+lgbm_pipeline = Pipeline(
+    [
+        ("preprocess", lgbm_preprocess),
+        (
+            "model",
+            LGBMRegressor(
+                objective="tweedie",
+                tweedie_variance_power=POWER,
+                random_state=42,
+                n_jobs=2,
+                verbosity=-1,
+            ),
+        ),
+    ]
+)
 
 search = GridSearchCV(
     lgbm_pipeline,
@@ -208,21 +211,20 @@ best_lgbm = search.best_estimator_
 lgbm_train = deviance(best_lgbm, X_train, y_train, w_train)
 lgbm_test = deviance(best_lgbm, X_test, y_test, w_test)
 
-results = pd.DataFrame({
-    "Model": ["Linear Tweedie", "Quadratic Tweedie", "Tuned LightGBM"],
-    "Train deviance": [linear_train, quadratic_train, lgbm_train],
-    "CV deviance": [linear_cv.mean(), quadratic_cv.mean(), -search.best_score_],
-    "Test deviance": [linear_test, quadratic_test, lgbm_test],
-})
+results = pd.DataFrame(
+    {
+        "Model": ["Linear Tweedie", "Quadratic Tweedie", "Tuned LightGBM"],
+        "Train deviance": [linear_train, quadratic_train, lgbm_train],
+        "CV deviance": [linear_cv.mean(), quadratic_cv.mean(), -search.best_score_],
+        "Test deviance": [linear_test, quadratic_test, lgbm_test],
+    }
+)
 
 print("Best LightGBM parameters:", search.best_params_)
 print(results.round(4).to_string(index=False))
 
 # %%
 
-import matplotlib.pyplot as plt
-import numpy as np
-from sklearn.metrics import auc
 
 df_test["PurePremium"] = y_test
 df_test["pp_t_glm1"] = linear_glm.predict(X_test)
@@ -233,7 +235,9 @@ df_test["pp_t_lgbm"] = best_lgbm.predict(X_test)
 
 
 # Source: https://scikit-learn.org/stable/auto_examples/linear_model/plot_tweedie_regression_insurance_claims.html
-def lorenz_curve(y_true, y_pred, exposure):
+def lorenz_curve(
+    y_true: ArrayLike, y_pred: ArrayLike, exposure: ArrayLike
+) -> tuple[np.ndarray, np.ndarray]:
     y_true, y_pred = np.asarray(y_true), np.asarray(y_pred)
     exposure = np.asarray(exposure)
 
@@ -243,8 +247,8 @@ def lorenz_curve(y_true, y_pred, exposure):
     ranked_pure_premium = y_true[ranking]
     cumulated_claim_amount = np.cumsum(ranked_pure_premium * ranked_exposure)
     cumulated_claim_amount /= cumulated_claim_amount[-1]
-    cumulated_samples = np.arange(1, len(cumulated_claim_amount) + 1)
-    cumulated_samples = cumulated_samples / len(cumulated_claim_amount)
+    n_samples = len(cumulated_claim_amount)
+    cumulated_samples = np.arange(1, n_samples + 1) / n_samples
     return np.r_[0.0, cumulated_samples], np.r_[0.0, cumulated_claim_amount]
 
 
@@ -285,3 +289,113 @@ plt.show()
 # Mean CV deviance fell by 0.0222, with improvement in two of the three folds.
 # The tuned LightGBM had the lowest test deviance (72.8520) and the highest
 # Gini among the fitted models (0.251).
+
+# %%
+# =============================================================================
+# PS4: Model evaluation & interpretability
+# =============================================================================
+
+# %%
+# PS4 Ex 1, Step 1: exposure-weighted average claims per BonusMalus value.
+# Training data only, because this plot informs a modelling decision
+# (whether to add a monotonicity constraint) and must not see the test set
+
+bm_summary = (
+    df_train.groupby("BonusMalus")
+    .agg(claim_amount=("ClaimAmountCut", "sum"), exposure=("Exposure", "sum"))
+    .assign(avg_claims=lambda d: d["claim_amount"] / d["exposure"])
+)
+
+fig, (ax_claims, ax_exposure) = plt.subplots(
+    2, 1, figsize=(10, 7), sharex=True, gridspec_kw={"height_ratios": [3, 1]}
+)
+ax_claims.plot(
+    bm_summary.index, bm_summary["avg_claims"], marker="o", markersize=3, linewidth=1
+)
+ax_claims.set(
+    title="Exposure-weighted average claims per BonusMalus value (training data)",
+    ylabel="Claim amount per year of exposure",
+)
+ax_exposure.bar(bm_summary.index, bm_summary["exposure"], width=1)
+ax_exposure.set(xlabel="BonusMalus", ylabel="Exposure (years)", yscale="log")
+for ax in (ax_claims, ax_exposure):
+    ax.grid(alpha=0.3)
+fig.tight_layout()
+plt.show()
+
+# %%
+# PS4 Ex 1, Step 2: LGBM with an increasing monotonicity constraint on BonusMalus.
+from sklearn.base import clone
+
+# LightGBM sees the columns AFTER preprocessing (one-hot columns + numeric
+# passthrough), so the constraint list must follow that order and length.
+lgbm_feature_names = clone(lgbm_preprocess).fit(X_train).get_feature_names_out()
+monotone_constraints = [
+    1 if name == "num__BonusMalus" else 0 for name in lgbm_feature_names
+]
+
+constrained_lgbm = clone(lgbm_pipeline).set_params(
+    model__monotone_constraints=monotone_constraints
+)
+
+print(f"LightGBM sees {len(lgbm_feature_names)} columns")
+print(
+    "Constrained column(s):",
+    [n for n, c in zip(lgbm_feature_names, monotone_constraints) if c == 1],
+)
+
+# %%
+# PS4 Ex 1, Step 3: cross-validate the constrained LGBM with the SAME grid,
+# folds and scoring as the unconstrained one, so only the constraint differs.
+constrained_search = GridSearchCV(
+    constrained_lgbm,
+    param_grid=search.param_grid,
+    cv=cv,
+    scoring=neg_weighted_deviance,
+    refit=True,
+    verbose=1,
+    error_score="raise",
+)
+constrained_search.fit(X_train, y_train, model__sample_weight=w_train)
+
+best_constrained_lgbm = constrained_search.best_estimator_
+df_test["pp_t_lgbm_constrained"] = best_constrained_lgbm.predict(X_test)
+
+comparison = pd.DataFrame(
+    {
+        "Model": ["Unconstrained LightGBM", "Constrained LightGBM"],
+        "Train deviance": [
+            lgbm_train,
+            deviance(best_constrained_lgbm, X_train, y_train, w_train),
+        ],
+        "CV deviance": [-search.best_score_, -constrained_search.best_score_],
+        "Test deviance": [
+            lgbm_test,
+            deviance(best_constrained_lgbm, X_test, y_test, w_test),
+        ],
+    }
+)
+print("Best constrained parameters:", constrained_search.best_params_)
+print(comparison.round(4).to_string(index=False))
+
+# %%
+# Sanity check: does the prediction ever DECREASE when only BonusMalus increases?
+bm_grid = np.arange(X_train["BonusMalus"].min(), X_train["BonusMalus"].max() + 1)
+check_rows = X_test.sample(200, random_state=42)
+
+
+def n_decreasing_profiles(model: Pipeline) -> int:
+    """Count rows whose prediction falls somewhere along the BonusMalus grid."""
+    n_decreasing = 0
+    for _, row in check_rows.iterrows():
+        profile = pd.DataFrame([row] * len(bm_grid)).assign(BonusMalus=bm_grid)
+        n_decreasing += int(np.any(np.diff(model.predict(profile)) < 0))
+    return n_decreasing
+
+
+print("Rows (of 200) with a decreasing BonusMalus profile:")
+print("  unconstrained:", n_decreasing_profiles(best_lgbm))
+print("  constrained:  ", n_decreasing_profiles(best_constrained_lgbm))
+
+#  small loss in deviance (about 0.2, small compared with the fold-to-fold variation of about 0.8)
+#  buys predictions that are monotone in BonusMalus, plus less overfitting
