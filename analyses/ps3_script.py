@@ -343,3 +343,59 @@ print(
     "Constrained column(s):",
     [n for n, c in zip(lgbm_feature_names, monotone_constraints) if c == 1],
 )
+
+# %%
+# PS4 Ex 1, Step 3: cross-validate the constrained LGBM with the SAME grid,
+# folds and scoring as the unconstrained one, so only the constraint differs.
+constrained_search = GridSearchCV(
+    constrained_lgbm,
+    param_grid=search.param_grid,
+    cv=cv,
+    scoring=neg_weighted_deviance,
+    refit=True,
+    verbose=1,
+    error_score="raise",
+)
+constrained_search.fit(X_train, y_train, model__sample_weight=w_train)
+
+best_constrained_lgbm = constrained_search.best_estimator_
+df_test["pp_t_lgbm_constrained"] = best_constrained_lgbm.predict(X_test)
+
+comparison = pd.DataFrame(
+    {
+        "Model": ["Unconstrained LightGBM", "Constrained LightGBM"],
+        "Train deviance": [
+            lgbm_train,
+            deviance(best_constrained_lgbm, X_train, y_train, w_train),
+        ],
+        "CV deviance": [-search.best_score_, -constrained_search.best_score_],
+        "Test deviance": [
+            lgbm_test,
+            deviance(best_constrained_lgbm, X_test, y_test, w_test),
+        ],
+    }
+)
+print("Best constrained parameters:", constrained_search.best_params_)
+print(comparison.round(4).to_string(index=False))
+
+# %%
+# Sanity check: does the prediction ever DECREASE when only BonusMalus increases?
+bm_grid = np.arange(X_train["BonusMalus"].min(), X_train["BonusMalus"].max() + 1)
+check_rows = X_test.sample(200, random_state=42)
+
+
+def n_decreasing_profiles(model: Pipeline) -> int:
+    """Count rows whose prediction falls somewhere along the BonusMalus grid."""
+    n_decreasing = 0
+    for _, row in check_rows.iterrows():
+        profile = pd.DataFrame([row] * len(bm_grid)).assign(BonusMalus=bm_grid)
+        n_decreasing += int(np.any(np.diff(model.predict(profile)) < 0))
+    return n_decreasing
+
+
+print("Rows (of 200) with a decreasing BonusMalus profile:")
+print("  unconstrained:", n_decreasing_profiles(best_lgbm))
+print("  constrained:  ", n_decreasing_profiles(best_constrained_lgbm))
+
+#  small loss in deviance (about 0.2, small compared with the fold-to-fold variation of about 0.8)
+#  buys predictions that are monotone in BonusMalus, plus less overfitting
