@@ -322,4 +322,24 @@ for ax in (ax_claims, ax_exposure):
     ax.grid(alpha=0.3)
 fig.tight_layout()
 plt.show()
+
 # %%
+# PS4 Ex 1, Step 2: LGBM with an increasing monotonicity constraint on BonusMalus.
+from sklearn.base import clone
+
+# LightGBM sees the columns AFTER preprocessing (one-hot columns + numeric
+# passthrough), so the constraint list must follow that order and length.
+lgbm_feature_names = clone(lgbm_preprocess).fit(X_train).get_feature_names_out()
+monotone_constraints = [
+    1 if name == "num__BonusMalus" else 0 for name in lgbm_feature_names
+]
+
+constrained_lgbm = clone(lgbm_pipeline).set_params(
+    model__monotone_constraints=monotone_constraints
+)
+
+print(f"LightGBM sees {len(lgbm_feature_names)} columns")
+print(
+    "Constrained column(s):",
+    [n for n, c in zip(lgbm_feature_names, monotone_constraints) if c == 1],
+)
