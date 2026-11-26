@@ -457,3 +457,44 @@ metrics_comparison = pd.concat(
 print(metrics_comparison.round(4))
 
 # %%
+# PS4 Ex 4: partial dependence plots (PDPs) with DALEX,
+# comparing the unconstrained and the constrained LGBM on the test set.
+import dalex as dx
+
+unconstrained_explainer = dx.Explainer(
+    best_lgbm, X_test, y_test, label="Unconstrained LGBM", verbose=False
+)
+constrained_explainer = dx.Explainer(
+    best_constrained_lgbm, X_test, y_test, label="Constrained LGBM", verbose=False
+)
+
+# %%
+# Numerical features: DALEX evaluates an evenly spaced grid of values.
+pdp_numerical_unconstrained = unconstrained_explainer.model_profile(
+    variables=numeric_cols, random_state=42, verbose=False
+)
+pdp_numerical_constrained = constrained_explainer.model_profile(
+    variables=numeric_cols, random_state=42, verbose=False
+)
+pdp_numerical_constrained.plot(pdp_numerical_unconstrained)
+
+# %%
+# Categorical features: evaluate only the categories that exist. DrivAge and
+# VehAge are stored as integer codes, so without variable_splits DALEX would
+# also predict for non-existent values such as 2.37.
+categories = {col: sorted(X_test[col].unique()) for col in categorical_cols}
+pdp_categorical_unconstrained = unconstrained_explainer.model_profile(
+    variables=categorical_cols,
+    variable_type="categorical",
+    variable_splits=categories,
+    random_state=42,
+    verbose=False,
+)
+pdp_categorical_constrained = constrained_explainer.model_profile(
+    variables=categorical_cols,
+    variable_type="categorical",
+    variable_splits=categories,
+    random_state=42,
+    verbose=False,
+)
+pdp_categorical_constrained.plot(pdp_categorical_unconstrained)

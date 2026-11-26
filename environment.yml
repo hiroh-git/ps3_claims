@@ -19,7 +19,11 @@ dependencies:
   - ipykernel
   # plots
   - matplotlib
+  - plotly
+  - nbformat
   # ml
   - glum
   - lightgbm
   - scikit-learn
+  - pip:
+    - dalex>=1.8
