@@ -498,3 +498,18 @@ pdp_categorical_constrained = constrained_explainer.model_profile(
     verbose=False,
 )
 pdp_categorical_constrained.plot(pdp_categorical_unconstrained)
+
+# %%
+# PS4 Ex 5
+# Sample the first row of the test set
+observation = X_test.iloc[0]
+
+# Initial GLM Explainer
+glm_explainer = dx.Explainer(
+    linear_glm, X_test, y_test, label="Initial GLM", verbose=False
+)
+
+# SHAP
+shap_lgbm = constrained_explainer.predict_parts(observation, type="shap")
+shap_glm = glm_explainer.predict_parts(observation, type="shap")
+shap_lgbm.plot(shap_glm)
